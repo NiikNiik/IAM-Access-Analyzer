@@ -34,7 +34,6 @@
                           },
                           "Principal": {
                               "AWS": [
-                                "111122223333",
                                 {"Ref": "AWS::AccountId"}
                               ]
                           }
@@ -72,11 +71,6 @@
                       "PolicyDocument": {
                           "Version": "2012-10-17",
                           "Statement": [
-                              {
-                                  "Effect": "Allow",
-                                  "Action": "sqs:ThisActionDoesNotExist",
-                                  "Resource": "*"
-                              },
                               {
                                   "Effect": "Allow",
                                   "Action": "sqs:ReceiveMessage",
