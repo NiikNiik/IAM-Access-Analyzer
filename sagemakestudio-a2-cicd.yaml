@@ -1,0 +1,261 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: CloudFormation template to provision resources for iam-access-analyzer-cicd workshop
+
+Parameters:
+  UserProfileName:
+    Type: String
+    Description: "user profile name"
+    Default: "defaultuser"
+  CodeEditorInstanceType:
+    Description: The type of instance to connect to the environment
+    Type: String
+    Default: "ml.t3.medium"
+  ParticipantRoleName:
+    Description: Role assigned to particpants
+    Type: String
+    Default: WSParticipantRole
+
+Mappings: 
+  RegionMap: 
+    us-east-1: 
+      HVM64: arn:aws:sagemaker:us-east-1:885854791233:image/sagemaker-distribution-cpu
+    us-east-2: 
+      HVM64: arn:aws:sagemaker:us-east-2:037914896644:image/sagemaker-distribution-cpu
+    us-west-1: 
+      HVM64: arn:aws:sagemaker:us-west-1:053634841547:image/sagemaker-distribution-cpu
+    us-west-2: 
+      HVM64: arn:aws:sagemaker:us-west-2:542918446943:image/sagemaker-distribution-cpu
+   
+
+Resources:
+  PubPrivateVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+     
+  PrivateSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref PubPrivateVPC
+      AvailabilityZone: 
+        Fn::Select:
+        - 0
+        - Fn::GetAZs: ""
+      CidrBlock: 10.0.3.0/24
+      MapPublicIpOnLaunch: false 
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref PubPrivateVPC
+      AvailabilityZone: 
+        Fn::Select: 
+        - 0
+        - Fn::GetAZs: ""
+      CidrBlock: 10.0.1.0/24
+      MapPublicIpOnLaunch: false
+
+  NatPublicIP:
+    Type: AWS::EC2::EIP
+    DependsOn: PubPrivateVPC
+    Properties:
+      Domain: vpc
+  
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+  
+  GatewayToInternet:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref PubPrivateVPC
+      InternetGatewayId: !Ref InternetGateway
+      
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref PubPrivateVPC
+  
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: GatewayToInternet
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    DependsOn: NatPublicIP
+    Properties: 
+       SubnetId: !Ref PublicSubnet
+       AllocationId: !GetAtt NatPublicIP.AllocationId
+     
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref PubPrivateVPC
+      
+  PrivateRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      NatGatewayId: !Ref NatGateway
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+     
+  PrivateSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet
+      RouteTableId: !Ref PrivateRouteTable
+
+  SageMakerExecutionRole:
+    DependsOn: A2CicdOidcRolePolicy
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - sagemaker.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSageMakerFullAccess
+        - !GetAtt A2CicdOidcRolePolicy.PolicyArn
+
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Sagemaker Studio Security Group
+      VpcId: !Ref PubPrivateVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 2049
+          ToPort: 2049
+          CidrIp: 10.0.3.0/24
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 2049
+          ToPort: 2049
+          CidrIp: 0.0.0.0/0
+  
+  StudioDomain:
+    DependsOn: SageMakerExecutionRole
+    Type: AWS::SageMaker::Domain
+    Properties:
+      AuthMode: IAM
+      DefaultUserSettings:
+        CodeEditorAppSettings:
+          DefaultResourceSpec:
+           InstanceType: !Ref CodeEditorInstanceType
+        ExecutionRole: !GetAtt SageMakerExecutionRole.Arn
+        StudioWebPortal: ENABLED
+      DomainName: MyBuilderSessionDomain
+      SubnetIds: 
+        - !Ref PublicSubnet
+      VpcId: !Ref PubPrivateVPC
+
+  UserProfile:
+    DependsOn: StudioDomain
+    Type: AWS::SageMaker::UserProfile
+    Properties:
+      DomainId: !GetAtt StudioDomain.DomainId
+      UserProfileName: !Ref UserProfileName
+      UserSettings: 
+        CodeEditorAppSettings:
+          DefaultResourceSpec:
+           InstanceType: !Ref CodeEditorInstanceType
+           SageMakerImageArn: !FindInMap [RegionMap, !Ref "AWS::Region", HVM64]
+        ExecutionRole: !GetAtt SageMakerExecutionRole.Arn
+        SecurityGroups: 
+          - !Ref SecurityGroup
+        StudioWebPortal: ENABLED
+
+  UserSpace:
+   DependsOn: UserProfile
+   Type: AWS::SageMaker::Space
+   Properties:
+     DomainId: !GetAtt StudioDomain.DomainId
+     OwnershipSettings: 
+       OwnerUserProfileName: !Ref UserProfileName
+     SpaceName: BuilderSession
+     SpaceDisplayName: BuilderSession 
+     SpaceSettings: 
+       AppType: CodeEditor
+       CodeEditorAppSettings:
+         DefaultResourceSpec:
+           InstanceType: !Ref CodeEditorInstanceType
+           SageMakerImageArn: !FindInMap [RegionMap, !Ref "AWS::Region", HVM64]
+       SpaceStorageSettings:
+         EbsStorageSettings:
+           EbsVolumeSizeInGb: 5
+     SpaceSharingSettings: 
+       SharingType: Private
+
+  A2CicdArtifactBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete 
+
+  A2CicdOidcRolePolicy:
+    Type: 'AWS::IAM::ManagedPolicy'
+    Properties:
+      ManagedPolicyName: A2CicdOidcRolePolicy
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - 'iam:GetPolicy'
+              - 'iam:GetPolicyVersion'
+              - 'access-analyzer:ListAnalyzers'
+              - 'access-analyzer:ValidatePolicy'
+              - 'access-analyzer:CreateAccessPreview'
+              - 'access-analyzer:GetAccessPreview'
+              - 'access-analyzer:ListAccessPreviewFindings'
+              - 'access-analyzer:CreateAnalyzer'
+              - 'access-analyzer:CheckAccessNotGranted'
+              - 'access-analyzer:CheckNoNewAccess'
+              - 's3:ListAllMyBuckets'
+              - 'cloudformation:ListExports'
+              - 'ssm:GetParameter'
+              - 'cloudformation:CreateStack'
+              - 'cloudformation:DescribeStacks'
+              - 'cloudformation:CreateChangeSet'
+              - 'cloudformation:DescribeChangeSet'
+              - 'cloudformation:DeleteChangeSet'
+              - 'cloudformation:ExecuteChangeSet'
+              - 'iam:CreateRole'
+              - 'iam:PutRolePolicy'
+            Resource: '*'
+          - Effect: Allow
+            Action:
+              - 's3:GetObject'
+              - 's3:ListBucket'
+              - 's3:PutObject'
+            Resource: 
+              - !Sub "arn:aws:s3:::${A2CicdArtifactBucket}/*"
+              - !Sub "arn:aws:s3:::${A2CicdArtifactBucket}"
+          - Effect: Allow
+            Action:
+              - 'iam:CreateServiceLinkedRole'
+            Resource: '*'
+            Condition:
+                    StringEquals:
+                      iam:AWSServiceName:
+                        - 'access-analyzer.amazonaws.com'
+
+Outputs:
+  A2CicdArtifactBucket:
+    Description: S3 bucket for lab artifacts
+    Value: !Ref A2CicdArtifactBucket
+    
+  StudioURL:
+    Description: Studio DomainId
+    Value: !GetAtt StudioDomain.DomainId 
+
+  VpcID:
+    Description: VPC ID
+    Value: !Ref PubPrivateVPC
